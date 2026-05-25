@@ -189,6 +189,92 @@ class RemoteOSFaultInjector(FaultInjector):
 
         self._wait_for_worker_nodes("Ready")
 
+    def _wait_for_single_node(
+        self, node_name: str, target_status: str = "Ready", timeout: int = NODE_NOT_READY_TIMEOUT
+    ):
+        """Poll until a single named node reaches target status."""
+        print(f"Waiting for node {node_name} to become {target_status}...")
+        start = time.time()
+        while time.time() - start < timeout:
+            output = self.kubectl.exec_command("kubectl get nodes --no-headers")
+            for line in output.strip().splitlines():
+                parts = line.split()
+                if len(parts) >= 2 and parts[0] == node_name and parts[1] == target_status:
+                    print(f"Node {node_name} is {target_status}.")
+                    return
+            time.sleep(NODE_NOT_READY_POLL_INTERVAL)
+        print(f"Timed out after {timeout}s waiting for {node_name} to become {target_status}.")
+
+    def _disk_pressure_script(self, fill_mb: int, threshold: str) -> str:
+        """Build the shell script that fills /var/log and lowers the kubelet eviction threshold."""
+        return (
+            f"dd if=/dev/zero of=/var/log/sregym_fill.log bs=1M count={fill_mb} status=none && "
+            "CFG=/var/lib/kubelet/config.yaml && "
+            "if grep -q 'evictionHard:' \"$CFG\"; then "
+            "  if grep -q 'nodefs.available' \"$CFG\"; then "
+            f'    sed -i \'s|nodefs.available:.*|nodefs.available: "{threshold}"|\' "$CFG"; '
+            "  else "
+            f'    sed -i \'/evictionHard:/a\\  nodefs.available: "{threshold}"\' "$CFG"; '
+            "  fi; "
+            "else "
+            f'  printf \'\\nevictionHard:\\n  nodefs.available: "{threshold}"\\n\' >> "$CFG"; '
+            "fi && "
+            "systemctl restart kubelet"
+        )
+
+    def _disk_pressure_recover_script(self) -> str:
+        """Build the shell script that removes the fill file and restores kubelet config."""
+        return (
+            "rm -f /var/log/sregym_fill.log; "
+            "CFG=/var/lib/kubelet/config.yaml && "
+            "sed -i '/nodefs.available:/d' \"$CFG\"; "
+            "systemctl restart kubelet"
+        )
+
+    def inject_disk_pressure(self, node_name: str, fill_mb: int = 500, threshold: str = "50%"):
+        """Fill /var/log on the target node and lower kubelet's nodefs.available eviction threshold.
+
+        Combines a real on-disk fill with a threshold flip so the kubelet evicts pods quickly while
+        leaving a diagnosable signal on the node filesystem.
+        """
+        script = self._disk_pressure_script(fill_mb=fill_mb, threshold=threshold)
+        if self._check_is_kind():
+            containers = self._get_kind_worker_containers()
+            if node_name not in containers:
+                print(f"Node {node_name} not found among kind worker containers: {containers}")
+                return
+            print(f"Inducing disk pressure in {node_name} (fill {fill_mb}MB, threshold {threshold})...")
+            self._docker_exec(node_name, script)
+        else:
+            worker_nodes = self._get_worker_node_names()
+            if node_name not in worker_nodes:
+                print(f"Node {node_name} not found among worker nodes: {worker_nodes}")
+                return
+            print(f"Inducing disk pressure on {node_name} (fill {fill_mb}MB, threshold {threshold})...")
+            self._node_exec(node_name, script)
+
+        self._wait_for_single_node(node_name, target_status="Ready")
+
+    def recover_disk_pressure(self, node_name: str):
+        """Remove the fill file, restore the kubelet eviction threshold, and restart kubelet."""
+        script = self._disk_pressure_recover_script()
+        if self._check_is_kind():
+            containers = self._get_kind_worker_containers()
+            if node_name not in containers:
+                print(f"Node {node_name} not found among kind worker containers: {containers}")
+                return
+            print(f"Recovering disk pressure in {node_name}...")
+            self._docker_exec(node_name, script)
+        else:
+            worker_nodes = self._get_worker_node_names()
+            if node_name not in worker_nodes:
+                print(f"Node {node_name} not found among worker nodes: {worker_nodes}")
+                return
+            print(f"Recovering disk pressure on {node_name}...")
+            self._node_exec(node_name, script)
+
+        self._wait_for_single_node(node_name, target_status="Ready")
+
 
 def main():
     injector = RemoteOSFaultInjector()

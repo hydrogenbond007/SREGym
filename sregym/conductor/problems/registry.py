@@ -12,6 +12,7 @@ from sregym.conductor.problems.auth_miss_mongodb import MongoDBAuthMissing
 from sregym.conductor.problems.capacity_decrease_rpc_retry_storm import CapacityDecreaseRPCRetryStorm
 from sregym.conductor.problems.cart_service_failure import CartServiceFailure
 from sregym.conductor.problems.configmap_drift import ConfigMapDrift
+from sregym.conductor.problems.disk_pressure_eviction import DiskPressureEviction
 from sregym.conductor.problems.duplicate_pvc_mounts import DuplicatePVCMounts
 from sregym.conductor.problems.edge_request_filter_cpu_saturation import EdgeRequestFilterCPUSaturation
 from sregym.conductor.problems.env_variable_shadowing import EnvVariableShadowing
@@ -286,6 +287,7 @@ class ProblemRegistry:
             # ]),
             # ad hoc:
             "kubelet_crash": KubeletCrash,
+            "disk_pressure_eviction": DiskPressureEviction,
             "workload_imbalance": WorkloadImbalance,
             # ==================== K8S OPERATOR MISOPERATION ==================
             "operator_overload_replicas": K8SOperatorOverloadReplicasFault,

@@ -16,8 +16,8 @@ class KubeletEvictionThresholdMisconfig(Problem):
         self.kubectl = KubeCtl()
         self.namespace = self.app.namespace
         self.faulty_service = "currency"
-        self.target_node = "kind-worker"
         self.injector = RemoteOSFaultInjector()
+        self.target_node = self._pick_worker_node()
         self.injected_threshold: float | None = None
 
         self.root_cause = self.build_structured_root_cause(
@@ -39,6 +39,15 @@ class KubeletEvictionThresholdMisconfig(Problem):
         self.mitigation_oracle = KubeletEvictionThresholdMisconfigMitigationOracle(problem=self)
 
         self.app.create_workload()
+
+    def _pick_worker_node(self) -> str:
+        """Return first worker node name from the cluster."""
+        output = self.kubectl.exec_command("kubectl get nodes --no-headers")
+        for line in output.strip().splitlines():
+            parts = line.split()
+            if len(parts) >= 3 and "control-plane" not in parts[2]:
+                return parts[0]
+        raise RuntimeError("No worker nodes available for disk pressure injection.")
 
     @mark_fault_injected
     def inject_fault(self):

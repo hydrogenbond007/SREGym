@@ -206,27 +206,6 @@ class RemoteOSFaultInjector(FaultInjector):
             time.sleep(NODE_NOT_READY_POLL_INTERVAL)
         print(f"Timed out after {timeout}s waiting for {node_name} to become {target_status}.")
 
-    def _disk_pressure_script(self, threshold: float) -> str:
-        """Build the shell script that raises the kubelet nodefs.available eviction threshold."""
-        value = f'"{threshold}%"'
-        return (
-            "CFG=/var/lib/kubelet/config.yaml && "
-            "if grep -q 'evictionHard:' \"$CFG\"; then "
-            "  if grep -q 'nodefs.available' \"$CFG\"; then "
-            f"    sed -i 's|nodefs.available:.*|nodefs.available: {value}|' \"$CFG\"; "
-            "  else "
-            f"    sed -i '/evictionHard:/a\\  nodefs.available: {value}' \"$CFG\"; "
-            "  fi; "
-            "else "
-            f"  printf '\\nevictionHard:\\n  nodefs.available: {value}\\n' >> \"$CFG\"; "
-            "fi && "
-            "systemctl restart kubelet"
-        )
-
-    def _disk_pressure_recover_script(self) -> str:
-        """Build the shell script that restores the kubelet eviction threshold."""
-        return "CFG=/var/lib/kubelet/config.yaml && sed -i '/nodefs.available:/d' \"$CFG\"; systemctl restart kubelet"
-
     def _get_node_free_pct(self, node_name: str) -> int:
         """Return the current nodefs free-space percentage as reported by kubelet stats summary."""
         raw = self.kubectl.exec_command(f"kubectl get --raw '/api/v1/nodes/{node_name}/proxy/stats/summary'")
@@ -256,7 +235,20 @@ class RemoteOSFaultInjector(FaultInjector):
             threshold = float(min(99, free_pct + margin_pct))
             print(f"Node {node_name} free={free_pct}% -> threshold={threshold}%")
 
-        script = self._disk_pressure_script(threshold=threshold)
+        value = f'"{threshold}%"'
+        script = (
+            "CFG=/var/lib/kubelet/config.yaml && "
+            "if grep -q 'evictionHard:' \"$CFG\"; then "
+            "  if grep -q 'nodefs.available' \"$CFG\"; then "
+            f"    sed -i 's|nodefs.available:.*|nodefs.available: {value}|' \"$CFG\"; "
+            "  else "
+            f"    sed -i '/evictionHard:/a\\  nodefs.available: {value}' \"$CFG\"; "
+            "  fi; "
+            "else "
+            f"  printf '\\nevictionHard:\\n  nodefs.available: {value}\\n' >> \"$CFG\"; "
+            "fi && "
+            "systemctl restart kubelet"
+        )
         if self._check_is_kind():
             containers = self._get_kind_worker_containers()
             if node_name not in containers:
@@ -277,7 +269,7 @@ class RemoteOSFaultInjector(FaultInjector):
 
     def recover_disk_pressure(self, node_name: str):
         """Restore the kubelet eviction threshold and restart kubelet."""
-        script = self._disk_pressure_recover_script()
+        script = "CFG=/var/lib/kubelet/config.yaml && sed -i '/nodefs.available:/d' \"$CFG\"; systemctl restart kubelet"
         if self._check_is_kind():
             containers = self._get_kind_worker_containers()
             if node_name not in containers:

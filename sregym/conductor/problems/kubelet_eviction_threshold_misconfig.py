@@ -24,14 +24,11 @@ class KubeletEvictionThresholdMisconfig(Problem):
             component=f"node/{self.target_node}",
             namespace=self.namespace,
             description=(
-                f"Node `{self.target_node}` is reporting `DiskPressure=True` because the kubelet "
-                f"`nodefs.available` eviction threshold in `/var/lib/kubelet/config.yaml` has been "
-                f"raised above the node's actual filesystem free-space ratio. The "
-                f"`{self.faulty_service}` Deployment is pinned to this node via `nodeName`, so "
-                f"evicted pods are recreated on the same pressured node, producing a continuous "
-                f"eviction loop and sustained service unavailability. Note: `df` will show ample "
-                f"free disk; the cause is the misconfigured eviction threshold, not actual disk "
-                f"exhaustion."
+                f"Node `{self.target_node}` reports `DiskPressure=True` due to a misconfigured "
+                f"`nodefs.available` eviction threshold in `/var/lib/kubelet/config.yaml`, not "
+                f"actual disk exhaustion — `df` shows ample free space. Deployment "
+                f"`{self.faulty_service}` is pinned via `nodeName` to the same node, producing a "
+                f"continuous evict/recreate loop and sustained service unavailability."
             ),
         )
 

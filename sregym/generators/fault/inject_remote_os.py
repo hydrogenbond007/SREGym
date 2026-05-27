@@ -1,5 +1,6 @@
 """Inject faults at the OS layer via SSH (remote clusters) or docker exec (Kind)."""
 
+import json
 import os
 import re
 import subprocess
@@ -205,18 +206,19 @@ class RemoteOSFaultInjector(FaultInjector):
             time.sleep(NODE_NOT_READY_POLL_INTERVAL)
         print(f"Timed out after {timeout}s waiting for {node_name} to become {target_status}.")
 
-    def _disk_pressure_script(self, threshold: str) -> str:
+    def _disk_pressure_script(self, threshold: float) -> str:
         """Build the shell script that raises the kubelet nodefs.available eviction threshold."""
+        value = f'"{threshold}%"'
         return (
             "CFG=/var/lib/kubelet/config.yaml && "
             "if grep -q 'evictionHard:' \"$CFG\"; then "
             "  if grep -q 'nodefs.available' \"$CFG\"; then "
-            f'    sed -i \'s|nodefs.available:.*|nodefs.available: "{threshold}"|\' "$CFG"; '
+            f"    sed -i 's|nodefs.available:.*|nodefs.available: {value}|' \"$CFG\"; "
             "  else "
-            f'    sed -i \'/evictionHard:/a\\  nodefs.available: "{threshold}"\' "$CFG"; '
+            f"    sed -i '/evictionHard:/a\\  nodefs.available: {value}' \"$CFG\"; "
             "  fi; "
             "else "
-            f'  printf \'\\nevictionHard:\\n  nodefs.available: "{threshold}"\\n\' >> "$CFG"; '
+            f"  printf '\\nevictionHard:\\n  nodefs.available: {value}\\n' >> \"$CFG\"; "
             "fi && "
             "systemctl restart kubelet"
         )
@@ -231,22 +233,28 @@ class RemoteOSFaultInjector(FaultInjector):
         fs = json.loads(raw)["node"]["fs"]
         return round(fs["availableBytes"] / fs["capacityBytes"] * 100)
 
-    def inject_disk_pressure(self, node_name: str, threshold: str | None = None, margin_pct: int = 10) -> str | None:
+    def inject_disk_pressure(
+        self, node_name: str, threshold: float | None = None, margin_pct: int = 10
+    ) -> float | None:
         """Raise kubelet's nodefs.available eviction threshold above the node's current free-space ratio.
 
         Pods evict regardless of actual disk usage. Threshold is computed dynamically from kubelet
-        stats summary (current_free + margin_pct, capped at 95%) unless explicitly overridden.
+        stats summary (current_free + margin_pct, capped at 99%) unless explicitly overridden.
 
-        Returns the threshold string applied (e.g. "75%"), or None if the node wasn't found.
+        Returns the threshold percent applied (e.g. 75.0), or None if the node wasn't found.
         """
         if threshold is None:
             try:
                 free_pct = self._get_node_free_pct(node_name)
-                threshold = f"{min(95, free_pct + margin_pct)}%"
-                print(f"Node {node_name} free={free_pct}% -> threshold={threshold}")
+
             except Exception as e:
-                threshold = "95%"
-                print(f"Failed to read node stats ({e!r}); falling back to threshold={threshold}")
+                raise RuntimeError(
+                    f"Cannot read kubelet stats summary for node {node_name} ({e!r}); "
+                    f"refusing to guess a threshold — pass `threshold=` explicitly to override."
+                ) from e
+
+            threshold = float(min(99, free_pct + margin_pct))
+            print(f"Node {node_name} free={free_pct}% -> threshold={threshold}%")
 
         script = self._disk_pressure_script(threshold=threshold)
         if self._check_is_kind():
@@ -254,14 +262,14 @@ class RemoteOSFaultInjector(FaultInjector):
             if node_name not in containers:
                 print(f"Node {node_name} not found among kind worker containers: {containers}")
                 return None
-            print(f"Inducing disk pressure in {node_name} (threshold {threshold})...")
+            print(f"Inducing disk pressure in {node_name} (threshold {threshold}%)...")
             self._docker_exec(node_name, script)
         else:
             worker_nodes = self._get_worker_node_names()
             if node_name not in worker_nodes:
                 print(f"Node {node_name} not found among worker nodes: {worker_nodes}")
                 return None
-            print(f"Inducing disk pressure on {node_name} (threshold {threshold})...")
+            print(f"Inducing disk pressure on {node_name} (threshold {threshold}%)...")
             self._node_exec(node_name, script)
 
         self._wait_for_single_node(node_name, target_status="Ready")

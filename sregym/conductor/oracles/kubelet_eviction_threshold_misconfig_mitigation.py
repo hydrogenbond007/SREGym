@@ -3,8 +3,8 @@ import re
 from sregym.conductor.oracles.mitigation import MitigationOracle
 
 
-def _parse_threshold(value: str) -> float | None:
-    """Parse a kubelet eviction threshold like '"95%"' or '85%' into a float percentage."""
+def _parse_config_threshold(value: str) -> float | None:
+    """Parse a kubelet config line like 'nodefs.available: "85%"' into a float percentage."""
     if not value:
         return None
     m = re.search(r"([\d.]+)\s*%", value)
@@ -38,7 +38,7 @@ class KubeletEvictionThresholdMisconfigMitigationOracle(MitigationOracle):
         injector = self.problem.injector
         kubectl = self.problem.kubectl
         target_node = self.problem.target_node
-        injected = _parse_threshold(self.problem.injected_threshold or "")
+        injected = self.problem.injected_threshold
 
         # Check 1: kubelet config threshold
         config_line = self._read_kubelet_config(injector, target_node).strip()
@@ -48,7 +48,7 @@ class KubeletEvictionThresholdMisconfigMitigationOracle(MitigationOracle):
             print(f"✅ nodefs.available threshold removed from kubelet config on {target_node}")
             threshold_ok = True
         else:
-            current = _parse_threshold(config_line)
+            current = _parse_config_threshold(config_line)
             if current is None:
                 print(f"❌ Could not parse threshold from kubelet config line: {config_line!r}")
             elif injected is None:

@@ -18,7 +18,7 @@ class KubeletEvictionThresholdMisconfig(Problem):
         self.faulty_service = "currency"
         self.target_node = "kind-worker"
         self.injector = RemoteOSFaultInjector()
-        self.injected_threshold: str | None = None
+        self.injected_threshold: float | None = None
 
         self.root_cause = self.build_structured_root_cause(
             component=f"node/{self.target_node}",

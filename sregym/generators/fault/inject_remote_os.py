@@ -1,6 +1,5 @@
 """Inject faults at the OS layer via SSH (remote clusters) or docker exec (Kind)."""
 
-import json
 import os
 import re
 import subprocess
@@ -206,12 +205,6 @@ class RemoteOSFaultInjector(FaultInjector):
             time.sleep(NODE_NOT_READY_POLL_INTERVAL)
         print(f"Timed out after {timeout}s waiting for {node_name} to become {target_status}.")
 
-    def _get_node_free_pct(self, node_name: str) -> int:
-        """Return the current nodefs free-space percentage as reported by kubelet stats summary."""
-        raw = self.kubectl.exec_command(f"kubectl get --raw '/api/v1/nodes/{node_name}/proxy/stats/summary'")
-        fs = json.loads(raw)["node"]["fs"]
-        return round(fs["availableBytes"] / fs["capacityBytes"] * 100)
-
     def inject_disk_pressure(
         self, node_name: str, threshold: float | None = None, margin_pct: int = 10
     ) -> float | None:
@@ -224,7 +217,7 @@ class RemoteOSFaultInjector(FaultInjector):
         """
         if threshold is None:
             try:
-                free_pct = self._get_node_free_pct(node_name)
+                free_pct = self.kubectl.get_node_free_pct(node_name)
 
             except Exception as e:
                 raise RuntimeError(

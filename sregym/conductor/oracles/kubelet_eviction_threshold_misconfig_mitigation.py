@@ -52,7 +52,7 @@ class KubeletEvictionThresholdMisconfigMitigationOracle(MitigationOracle):
                 print(f"❌ Could not parse threshold from kubelet config line: {config_line!r}")
             else:
                 try:
-                    free_pct = injector._get_node_free_pct(target_node)
+                    free_pct = kubectl.get_node_free_pct(target_node)
                 except Exception as e:
                     print(f"❌ Could not read kubelet stats summary for {target_node}: {e!r}")
                     return {"success": False}

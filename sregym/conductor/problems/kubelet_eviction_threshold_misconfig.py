@@ -75,5 +75,3 @@ class KubeletEvictionThresholdMisconfig(Problem):
         self.kubectl.exec_command(
             "kubectl delete pods --all-namespaces --field-selector=status.phase=Failed --ignore-not-found=true"
         )
-
-        print("=== Fault Recovered ===")

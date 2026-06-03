@@ -209,6 +209,12 @@ class ContainerRunner:
         if aws_dir.is_dir():
             args.extend(["-v", f"{aws_dir.resolve()}:/root/.aws:ro"])
 
+        # Mount root/user dotenv for agents that intentionally load secrets
+        # inside the isolated container (for example DeepSeek-backed adapters).
+        dotenv_file = Path.home() / ".env"
+        if dotenv_file.is_file():
+            args.extend(["-v", f"{dotenv_file.resolve()}:/root/.env:ro"])
+
         # Mount Codex credentials directory for subscription-based auth
         # (read-write so the CLI can update its model cache and telemetry)
         codex_dir = Path.home() / ".codex"

@@ -23,6 +23,15 @@ agents:
     kickoff_env: null
     install_script: install-claudecode.sh
     agent_version: null
+  - name: worldmodel
+    kickoff_command: python -m clients.worldmodel.driver
+    kickoff_workdir: .
+    kickoff_env:
+      CEREBRAL_BRAIN: generic
+      CEREBRAL_AGENT_BRAIN: mesh
+      CEREBRAL_GENERIC_BASE_URL: https://api.deepseek.com
+    install_script: install-worldmodel.sh
+    agent_version: null
   - name: "debug"
     kickoff_command: "python -c \"import signal; signal.pause()\""
     install_script: null

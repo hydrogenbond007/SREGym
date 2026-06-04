@@ -47,6 +47,8 @@ for candidate in (world_model_agents_path, local_world_model_agents_path):
 
 from cerebral_agents.sregym_runtime import (  # noqa: E402
     SREGymMcpTool,
+    SREGymObservation,
+    SREGymStageResult,
     SREGymWorldModelRuntime,
     provider_from_env,
 )
@@ -92,6 +94,24 @@ class SreGymMcp:
         return await self._call_tool("kubectl", "exec_kubectl_cmd_safely", {"cmd": cmd})
 
     async def _call_tool(self, endpoint: str, tool: str, args: dict[str, Any]) -> str:
+        timeout = _mcp_timeout_seconds(endpoint, tool, args)
+        started = time.monotonic()
+        logger.info("worldmodel MCP call start endpoint=%s tool=%s timeout=%.0fs args=%s", endpoint, tool, timeout, _log_args(args))
+        try:
+            result = await asyncio.wait_for(self._call_tool_once(endpoint, tool, args), timeout=timeout)
+        except TimeoutError:
+            logger.warning(
+                "worldmodel MCP call timeout endpoint=%s tool=%s elapsed=%.2fs args=%s",
+                endpoint,
+                tool,
+                time.monotonic() - started,
+                _log_args(args),
+            )
+            raise TimeoutError(f"MCP tool {endpoint}.{tool} timed out after {timeout:.0f}s") from None
+        logger.info("worldmodel MCP call done endpoint=%s tool=%s elapsed=%.2fs", endpoint, tool, time.monotonic() - started)
+        return result
+
+    async def _call_tool_once(self, endpoint: str, tool: str, args: dict[str, Any]) -> str:
         async with AsyncExitStack() as stack:
             session = await self._session(endpoint, stack)
             result = await session.call_tool(tool, arguments=args or {})
@@ -393,8 +413,35 @@ def _mcp_text(result: Any) -> str:
     return str(result)
 
 
-def _mcp_timeout_seconds() -> float:
+def _mcp_timeout_seconds(endpoint: str, tool: str, args: dict[str, Any]) -> float:
+    if endpoint == "kubectl" and tool == "exec_kubectl_cmd_safely":
+        cmd = str(args.get("cmd") or "")
+        if " rollout status " in f" {cmd} " or cmd.startswith("kubectl wait "):
+            return float(os.getenv("SREGYM_MCP_ROLLOUT_TIMEOUT_SECONDS", "75"))
     return float(os.getenv("SREGYM_MCP_CALL_TIMEOUT_SECONDS", "45"))
+
+
+def _log_args(args: dict[str, Any]) -> str:
+    return json.dumps(args, default=str)[:1000]
+
+
+def _stage_timeout_seconds(stage: str) -> float:
+    if stage == "diagnosis":
+        return float(os.getenv("SREGYM_WORLDMODEL_DIAGNOSIS_TIMEOUT_SECONDS", os.getenv("SREGYM_WORLDMODEL_STAGE_TIMEOUT_SECONDS", "240")))
+    return float(os.getenv("SREGYM_WORLDMODEL_MITIGATION_TIMEOUT_SECONDS", os.getenv("SREGYM_WORLDMODEL_STAGE_TIMEOUT_SECONDS", "420")))
+
+
+async def _bounded_stage(stage: str, task: Any) -> SREGymStageResult:
+    timeout = _stage_timeout_seconds(stage)
+    try:
+        return await asyncio.wait_for(task, timeout=timeout)
+    except TimeoutError:
+        message = f"StageTimeoutError: {stage} exceeded {timeout:.0f}s"
+        logger.exception(message)
+        return SREGymStageResult(
+            answer="" if stage == "mitigation" else message,
+            observations=[SREGymObservation("worldmodel.adapter", {"stage": stage}, message)],
+        )
 
 
 async def amain() -> None:
@@ -418,12 +465,12 @@ async def amain() -> None:
             max_steps=args.max_steps,
         )
 
-        diagnosis = await runner.diagnose(app_info, problem)
+        diagnosis = await _bounded_stage("diagnosis", runner.diagnose(app_info, problem))
         await mcp.submit(diagnosis.answer)
 
         mitigation = None
         if wait_for_stage({"mitigation", "done", "tearing_down"}) == "mitigation":
-            mitigation = await runner.mitigate(app_info, problem, diagnosis.answer)
+            mitigation = await _bounded_stage("mitigation", runner.mitigate(app_info, problem, diagnosis.answer))
             await mcp.submit(mitigation.answer)
 
         save_results(

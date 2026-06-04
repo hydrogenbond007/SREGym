@@ -42,11 +42,11 @@ class KubeCtl:
         # self.apps_v1_api = client.AppsV1Api()
 
     @staticmethod
-    def exec_command(command: str, input_data=None):
-        """Execute an arbitrary kubectl command."""
+    def exec_command(command: str, input_data=None, timeout: float | None = None):
+        """Execute an arbitrary kubectl command with timeout protection."""
         if input_data is not None:
             input_data = input_data.encode("utf-8")
-        timeout = _kubectl_timeout_seconds()
+        timeout = timeout if timeout is not None else _kubectl_timeout_seconds()
         started = time.monotonic()
         try:
             logger.info("kubectl exec start timeout=%ss command=%r", timeout, command)
@@ -58,17 +58,24 @@ class KubeCtl:
                 input=input_data,
                 timeout=timeout,
             )
-            out.stdout = out.stdout.decode("utf-8")
-            out.stderr = out.stderr.decode("utf-8")
+            out.stdout = _decode_output(out.stdout)
+            out.stderr = _decode_output(out.stderr)
             logger.info("kubectl exec done elapsed=%.2fs command=%r", time.monotonic() - started, command)
             return out
         except subprocess.CalledProcessError as e:
-            e.stderr = e.stderr.decode("utf-8")
-            logger.info("kubectl exec failed elapsed=%.2fs command=%r", time.monotonic() - started, command)
+            e.stdout = _decode_output(e.stdout)
+            e.stderr = _decode_output(e.stderr)
+            logger.warning(
+                "kubectl exec failed returncode=%s elapsed=%.2fs command=%r stderr=%s",
+                e.returncode,
+                time.monotonic() - started,
+                command,
+                e.stderr,
+            )
             return e
         except subprocess.TimeoutExpired as e:
-            stdout = _decode_timeout_output(e.stdout)
-            stderr = _decode_timeout_output(e.stderr)
+            stdout = _decode_output(e.stdout)
+            stderr = _decode_output(e.stderr)
             message = f"kubectl command timed out after {timeout:.0f}s: {command}"
             logger.warning("%s elapsed=%.2fs", message, time.monotonic() - started)
             return subprocess.CompletedProcess(command, 124, stdout=stdout, stderr=(stderr + "\n" + message).strip())
@@ -154,18 +161,19 @@ class KubeCtl:
             dry_run_arguments.extend(["-o", keylist])
 
         dry_run_command = KubeCtl.insert_flags(command, dry_run_arguments)
+        timeout = _kubectl_dry_run_timeout_seconds()
         try:
             dry_run_result = subprocess.run(  # nosec B602
                 dry_run_command,
                 shell=True,
                 capture_output=True,
                 text=True,
-                timeout=_kubectl_dry_run_timeout_seconds(),
+                timeout=timeout,
             )
         except subprocess.TimeoutExpired:
             return DryRunResult(
                 status=DryRunStatus.ERROR,
-                description=f"Dry-run timed out after {_kubectl_dry_run_timeout_seconds():.0f}s.",
+                description=f"Dry-run timed out after {timeout:.0f}s.",
                 result=[],
             )
 
@@ -219,14 +227,14 @@ class KubeCtl:
 
 
 def _kubectl_timeout_seconds() -> float:
-    return float(os.getenv("SREGYM_KUBECTL_CMD_TIMEOUT_SECONDS", "120"))
+    return float(os.getenv("SREGYM_KUBECTL_CMD_TIMEOUT_SECONDS", "300"))
 
 
 def _kubectl_dry_run_timeout_seconds() -> float:
     return float(os.getenv("SREGYM_KUBECTL_DRY_RUN_TIMEOUT_SECONDS", "30"))
 
 
-def _decode_timeout_output(value: bytes | str | None) -> str:
+def _decode_output(value: bytes | str | None) -> str:
     if value is None:
         return ""
     if isinstance(value, bytes):

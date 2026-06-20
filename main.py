@@ -91,6 +91,8 @@ def driver_loop(
     n_attempts: int = 1,
     agent_timeout: int = 1800,
     resume_csv: str | None = None,
+    problems_file: str | None = None,
+    run_label: str | None = None,
 ):
     """
     Deploy each problem and wait for HTTP grading via POST /submit.
@@ -103,10 +105,15 @@ def driver_loop(
         use_external_harness: If True, inject fault and exit without running evaluation logic.
         n_attempts: Number of end-to-end attempts to run each problem.
         resume_csv: Path to a previous results CSV to resume from (skip completed problems).
+        problems_file: Optional path to a newline-delimited file of problem IDs (a shard).
+            Overrides the default problem list. Ignored when problem_filter is set.
+        run_label: Optional suffix for the results/<timestamp> directory so parallel
+            workers write to distinct folders.
     """
 
     async def driver():
-        base_dir = Path("results") / get_current_datetime_formatted()
+        label_suffix = f"_{run_label}" if run_label else ""
+        base_dir = Path("results") / (get_current_datetime_formatted() + label_suffix)
         base_dir.mkdir(parents=True, exist_ok=True)
         global _driver_base_dir
         _driver_base_dir = base_dir
@@ -139,6 +146,14 @@ def driver_loop(
                 sys.exit(1)
             problem_ids = [problem_filter]
             console.log(f"🎯 Running single problem: {problem_filter}")
+        elif problems_file:
+            with open(problems_file) as f:
+                shard_ids = [line.strip() for line in f if line.strip() and not line.startswith("#")]
+            if not shard_ids:
+                console.log(f"⚠️  Problems file '{problems_file}' is empty; nothing to run.")
+                sys.exit(1)
+            problem_ids = shard_ids
+            console.log(f"🧩 Running {len(problem_ids)} problems from shard file: {problems_file}")
 
         # sanity check: are there any specified problem ids that do not exist in the registry?
         unknown_problem_ids = set(problem_ids) - set(all_problem_ids)
@@ -412,6 +427,8 @@ def _run_driver_and_shutdown(
     n_attempts: int = 1,
     agent_timeout: int = 1800,
     resume_csv: str | None = None,
+    problems_file: str | None = None,
+    run_label: str | None = None,
 ):
     """Run the benchmark driver, stash results, then tell the API to exit."""
     try:
@@ -423,6 +440,8 @@ def _run_driver_and_shutdown(
             n_attempts=n_attempts,
             agent_timeout=agent_timeout,
             resume_csv=resume_csv,
+            problems_file=problems_file,
+            run_label=run_label,
         )
         global _driver_results
         _driver_results = results
@@ -443,13 +462,18 @@ def main(args):
     if args.noise:
         logger.info("Noise injection enabled.")
 
-    # Push to env so downstream code picks it up
+    # Push to env so downstream code picks it up. Ports are configurable so
+    # multiple benchmark workers can run on one host without colliding.
+    api_port = getattr(args, "api_port", 8000)
+    mcp_port = getattr(args, "mcp_port", 9954)
+    proxy_port = getattr(args, "proxy_port", 16443)
     os.environ["AGENT_MODEL_ID"] = agent_model
     os.environ["JUDGE_MODEL_ID"] = judge_model
     os.environ["API_HOSTNAME"] = "0.0.0.0"
-    os.environ["API_PORT"] = "8000"
-    os.environ["MCP_SERVER_PORT"] = "9954"
-    os.environ["MCP_SERVER_URL"] = "http://127.0.0.1:9954"
+    os.environ["API_PORT"] = str(api_port)
+    os.environ["MCP_SERVER_PORT"] = str(mcp_port)
+    os.environ["MCP_SERVER_URL"] = f"http://127.0.0.1:{mcp_port}"
+    os.environ["K8S_PROXY_PORT"] = str(proxy_port)
 
     logger.info(f"🔧 Config — agent: {args.agent}, agent_model: {agent_model}, judge_model: {judge_model}")
 
@@ -484,6 +508,8 @@ def main(args):
             args.n_attempts,
             args.agent_timeout,
             args.resume,
+            getattr(args, "problems_file", None),
+            getattr(args, "run_label", None),
         ),
         name="driver",
         daemon=True,
@@ -600,6 +626,45 @@ if __name__ == "__main__":
         type=str,
         default=None,
         help="Resume from a previous results CSV file. Problems already in the CSV will be skipped.",
+    )
+    # --- Parallel-worker options ---------------------------------------------
+    # These let several independent benchmark processes run on one host, each
+    # owning its own cluster (via KUBECONFIG) and a distinct set of host ports.
+    # See run_parallel.py for the orchestrator that shards problems across them.
+    parser.add_argument(
+        "--problems-file",
+        type=str,
+        default=None,
+        help="Path to a newline-delimited file of problem IDs to run (a shard). "
+        "Overrides the default problem list. Ignored if --problem is set.",
+    )
+    parser.add_argument(
+        "--run-label",
+        type=str,
+        default=None,
+        help="Suffix appended to the results/<timestamp> directory so parallel "
+        "workers write to distinct result folders (e.g. 'worker0').",
+    )
+    parser.add_argument(
+        "--api-port",
+        type=int,
+        default=8000,
+        help="Host port for the Conductor HTTP API (default: 8000). "
+        "Give each parallel worker a distinct port.",
+    )
+    parser.add_argument(
+        "--mcp-port",
+        type=int,
+        default=9954,
+        help="Host port for the MCP server port-forward (default: 9954). "
+        "Give each parallel worker a distinct port.",
+    )
+    parser.add_argument(
+        "--proxy-port",
+        type=int,
+        default=16443,
+        help="Host port for the K8s API filtering proxy (default: 16443). "
+        "Give each parallel worker a distinct port.",
     )
     args = parser.parse_args()
 

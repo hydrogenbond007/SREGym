@@ -347,8 +347,15 @@ def main() -> None:
 
         env = os.environ.copy()
         env["KUBECONFIG"] = kc
+        # Ensure the interpreter dir is on PATH so a non-containerized agent's
+        # kickoff_command ("python -m clients.<agent>.driver") resolves to this
+        # same (venv) python, which has the deps. Without this the launcher's
+        # shell can't find `python` and the agent exits 127.
+        env["PATH"] = str(Path(sys.executable).parent) + os.pathsep + env.get("PATH", "")
         if args.cerebral and i in engine_urls:
             env["CEREBRAL_ENGINE_URL"] = engine_urls[i]
+            # Keep the cerebral stack alive across the conductor's per-problem reconcile.
+            env["SREGYM_PROTECTED_NAMESPACES"] = "cerebral"
 
         log_path = run_root / f"worker{i}.log"
         log_fh = open(log_path, "w")

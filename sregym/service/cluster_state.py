@@ -3,6 +3,7 @@
 import hashlib
 import json
 import logging
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -20,7 +21,29 @@ logger.setLevel(logging.DEBUG)
 # is included so that noise injection survives the per-problem cleanup —
 # without it the conductor wipes the chaos-mesh helm release and CRDs after
 # every problem and the next noise injection silently fails.
-PROTECTED_NAMESPACES = frozenset({"kube-system", "kube-public", "kube-node-lease", "default", "sregym", "chaos-mesh"})
+#
+# Extra namespaces can be protected via the SREGYM_PROTECTED_NAMESPACES env var
+# (comma-separated). This lets an agent that deploys a durable in-cluster
+# appliance (e.g. the Cerebral dataplane+engine in namespace `cerebral`) keep it
+# alive across the per-problem reconcile, without coupling SREGym to that agent.
+_EXTRA_PROTECTED_NAMESPACES = frozenset(
+    n.strip() for n in os.getenv("SREGYM_PROTECTED_NAMESPACES", "").split(",") if n.strip()
+)
+PROTECTED_NAMESPACES = (
+    frozenset({"kube-system", "kube-public", "kube-node-lease", "default", "sregym", "chaos-mesh"})
+    | _EXTRA_PROTECTED_NAMESPACES
+)
+
+
+def _is_protected_cluster_resource(name: str) -> bool:
+    """True if a cluster-scoped resource (ClusterRole/Binding) should be preserved.
+
+    Covers chaos-mesh plus any resource whose name is prefixed by an extra
+    protected namespace (e.g. `cerebral-engine`, `cerebral-dataplane-read`).
+    """
+    if _is_chaos_mesh_resource(name):
+        return True
+    return any(name == ns or name.startswith(f"{ns}-") for ns in _EXTRA_PROTECTED_NAMESPACES)
 
 
 def _is_chaos_mesh_resource(name: str) -> bool:
@@ -223,7 +246,7 @@ class ClusterStateManager:
             # Skip system roles that may have been auto-created
             if role.startswith("system:") or role.startswith("kubeadm:"):
                 continue
-            if _is_chaos_mesh_resource(role):
+            if _is_protected_cluster_resource(role):
                 continue
             logger.info(f"Deleting unexpected ClusterRole: {role}")
             try:
@@ -239,7 +262,7 @@ class ClusterStateManager:
         for binding in unexpected_bindings:
             if binding.startswith("system:") or binding.startswith("kubeadm:"):
                 continue
-            if _is_chaos_mesh_resource(binding):
+            if _is_protected_cluster_resource(binding):
                 continue
             logger.info(f"Deleting unexpected ClusterRoleBinding: {binding}")
             try:

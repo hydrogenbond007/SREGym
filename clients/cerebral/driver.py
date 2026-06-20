@@ -62,7 +62,13 @@ ENGINE_URL = os.getenv("CEREBRAL_ENGINE_URL", "http://localhost:8080").rstrip("/
 ENGINE_TIMEOUT = float(os.getenv("CEREBRAL_ENGINE_TIMEOUT", "60"))
 PIPELINE_TIMEOUT = float(os.getenv("CEREBRAL_PIPELINE_TIMEOUT", "240"))
 POLL_INTERVAL = float(os.getenv("CEREBRAL_PIPELINE_POLL_INTERVAL", "5"))
-SETTLE_SECONDS = float(os.getenv("CEREBRAL_SETTLE_SECONDS", "45"))
+SETTLE_SECONDS = float(os.getenv("CEREBRAL_SETTLE_SECONDS", "20"))
+# SREGym injects the fault during start_problem and only then launches the agent,
+# so the engine often creates the incident *before* this adapter process starts.
+# Accept incidents created up to LOOKBACK seconds before start to catch it. Safe
+# because problems run minutes apart (the prior problem's incident is older) and
+# the app namespace is torn down + recreated between problems.
+LOOKBACK_SECONDS = float(os.getenv("CEREBRAL_LOOKBACK_SECONDS", "300"))
 
 SUBMIT_STAGES = {"diagnosis", "mitigation"}
 TERMINAL_STAGES = {"done", "tearing_down"}
@@ -175,7 +181,7 @@ class CerebralRelay:
     def __init__(self, namespaces: list[str]) -> None:
         self.namespaces = set(namespaces)
         self.started = time.time()
-        self.created_after = self.started
+        self.created_after = self.started - LOOKBACK_SECONDS
         self.run_id: str | None = None
         self._done: dict[str, Any] | None = None  # cached terminal incident
 

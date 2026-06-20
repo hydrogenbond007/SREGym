@@ -25,10 +25,16 @@ class RemoteOSFaultInjector(FaultInjector):
         self._is_kind = None
 
     def _check_is_kind(self):
-        """Detect if the cluster is Kind-based."""
+        """Detect if the cluster is Kind-based.
+
+        Uses the node providerID (kind://...) rather than matching the
+        literal "kind-worker" node name, so detection is correct regardless
+        of the cluster name (e.g. parallel workers use clusters named
+        pbench0/pbench1, whose nodes are pbench0-worker, not kind-worker).
+        """
         if self._is_kind is None:
-            out = self.kubectl.exec_command("kubectl get nodes")
-            self._is_kind = "kind-worker" in out
+            out = self.kubectl.exec_command("kubectl get nodes -o jsonpath='{.items[*].spec.providerID}'")
+            self._is_kind = "kind://" in out
         return self._is_kind
 
     def _check_remote_host(self):

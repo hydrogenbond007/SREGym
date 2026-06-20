@@ -217,7 +217,7 @@ def main() -> None:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
     )
-    parser.add_argument("--agent", required=True, help="Agent to run (e.g. stratus, claudecode)")
+    parser.add_argument("--agent", default=None, help="Agent to run (e.g. stratus, claudecode). Defaults to 'cerebral' with --cerebral.")
     parser.add_argument("--model", required=True, help="LiteLLM model string")
     parser.add_argument("--judge-model", default=None, help="Judge model (defaults to --model)")
     parser.add_argument("--n-attempts", type=int, default=1, help="Attempts per problem (default: 1)")
@@ -255,6 +255,8 @@ def main() -> None:
         if not args.kind_clusters:
             sys.exit("❌ --cerebral requires --kind-clusters (cluster names are needed to deploy the stack).")
         args.agent = "cerebral"
+    if not args.agent:
+        sys.exit("❌ --agent is required (or use --cerebral).")
 
     # 1) Resolve per-worker kubeconfigs.
     run_root = REPO_ROOT / "results" / f"parallel_{datetime.now().strftime('%m%d_%H%M%S')}"

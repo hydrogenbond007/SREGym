@@ -55,3 +55,12 @@ agents:
     install_script: null
     agent_version: null
     container_isolation: false
+  - name: cerebral
+    kickoff_command: python -m clients.cerebral.driver
+    kickoff_workdir: .
+    kickoff_env: null
+    install_script: null
+    agent_version: null
+    # Relays an in-cluster Cerebral engine; runs on the host (no container) so it
+    # can reach the engine port-forward and apply the remediation via kubectl.
+    container_isolation: false

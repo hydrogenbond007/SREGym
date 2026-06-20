@@ -35,9 +35,11 @@ Restrict to a subset of problems (handy for validation):
 
 import argparse
 import csv
+import json
 import os
 import subprocess
 import sys
+import threading
 import time
 from datetime import datetime
 from pathlib import Path
@@ -49,6 +51,9 @@ REPO_ROOT = Path(__file__).resolve().parent
 API_PORT_BASE = 8000
 MCP_PORT_BASE = 9954
 PROXY_PORT_BASE = 16443
+ENGINE_PORT_BASE = 8080  # cerebral mode: worker i reaches its engine at localhost:8080+i
+
+DEPLOY_STACK_SH = REPO_ROOT / "scripts" / "cerebral" / "deploy_stack.sh"
 
 
 def discover_problem_ids() -> list[str]:
@@ -133,6 +138,79 @@ def newest_worker_dir(label: str, after_ts: float) -> Path | None:
     return candidates[-1] if candidates else None
 
 
+def deploy_cerebral_stack(cluster: str, log_path: Path) -> None:
+    """Deploy the cerebral stack into a kind cluster via deploy_stack.sh."""
+    if "DEEPSEEK_API_KEY" not in os.environ:
+        sys.exit("❌ --cerebral needs DEEPSEEK_API_KEY in the environment (source /root/.env).")
+    print(f"🧠 deploying cerebral stack into {cluster} → {log_path}")
+    with open(log_path, "w") as fh:
+        res = subprocess.run(
+            ["bash", str(DEPLOY_STACK_SH), cluster],
+            cwd=REPO_ROOT,
+            env=os.environ.copy(),
+            stdout=fh,
+            stderr=subprocess.STDOUT,
+        )
+    if res.returncode != 0:
+        sys.exit(f"❌ cerebral stack deploy failed for {cluster} (see {log_path})")
+
+
+class EnginePortForward:
+    """Keepalive `kubectl port-forward` to a cluster's cerebral-engine svc.
+
+    Restarts the forward if it drops, so a long worker run never loses the engine
+    connection. Call stop() to tear it down.
+    """
+
+    def __init__(self, kubeconfig: str, host_port: int, log_path: Path) -> None:
+        self.kubeconfig = kubeconfig
+        self.host_port = host_port
+        self.log_path = log_path
+        self._stop = threading.Event()
+        self._proc: subprocess.Popen | None = None
+        self._thread = threading.Thread(target=self._run, daemon=True)
+
+    def start(self) -> None:
+        self._thread.start()
+
+    def _run(self) -> None:
+        env = os.environ.copy()
+        env["KUBECONFIG"] = self.kubeconfig
+        with open(self.log_path, "w") as fh:
+            while not self._stop.is_set():
+                self._proc = subprocess.Popen(
+                    ["kubectl", "-n", "cerebral", "port-forward",
+                     "svc/cerebral-engine", f"{self.host_port}:8080"],
+                    env=env, stdout=fh, stderr=subprocess.STDOUT,
+                )
+                self._proc.wait()  # returns if the forward drops
+                if not self._stop.is_set():
+                    fh.write(f"\n[keepalive] port-forward dropped, restarting on :{self.host_port}\n")
+                    fh.flush()
+                    time.sleep(2)
+
+    def stop(self) -> None:
+        self._stop.set()
+        if self._proc and self._proc.poll() is None:
+            self._proc.terminate()
+
+
+def wait_engine_healthy(host_port: int, timeout: float = 120.0) -> bool:
+    """Poll the engine /api/health via the port-forward until ok or timeout."""
+    import urllib.request
+
+    start = time.time()
+    while time.time() - start < timeout:
+        try:
+            with urllib.request.urlopen(f"http://127.0.0.1:{host_port}/api/health", timeout=5) as r:
+                if json.loads(r.read()).get("status") == "ok":
+                    return True
+        except Exception:
+            pass
+        time.sleep(3)
+    return False
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Run the SREGym benchmark in parallel across sharded workers.",
@@ -164,7 +242,19 @@ def main() -> None:
         action="store_true",
         help="Pass --force-build to the first worker so the agent image is (re)built before others start.",
     )
+    parser.add_argument(
+        "--cerebral",
+        action="store_true",
+        help="Cerebral mode: deploy the cerebral dataplane+engine into each worker cluster, "
+        "port-forward its engine, and run the benchmark with --agent cerebral. Requires "
+        "--kind-clusters and DEEPSEEK_API_KEY in the environment.",
+    )
     args = parser.parse_args()
+
+    if args.cerebral:
+        if not args.kind_clusters:
+            sys.exit("❌ --cerebral requires --kind-clusters (cluster names are needed to deploy the stack).")
+        args.agent = "cerebral"
 
     # 1) Resolve per-worker kubeconfigs.
     run_root = REPO_ROOT / "results" / f"parallel_{datetime.now().strftime('%m%d_%H%M%S')}"
@@ -203,6 +293,25 @@ def main() -> None:
     for i, shard in enumerate(shards):
         print(f"   worker{i}: {len(shard)} problems  (cluster: {kubeconfigs[i]})")
 
+    # 2b) Cerebral mode: deploy the stack into each worker cluster and start a
+    # keepalive engine port-forward (worker i → localhost:ENGINE_PORT_BASE+i).
+    engine_pfs: list[EnginePortForward] = []
+    engine_urls: dict[int, str] = {}
+    if args.cerebral:
+        for i, cluster in enumerate(clusters):
+            if not shards[i]:
+                continue
+            deploy_cerebral_stack(cluster, run_root / f"worker{i}.cerebral-deploy.log")
+            port = ENGINE_PORT_BASE + i
+            pf = EnginePortForward(kubeconfigs[i], port, run_root / f"worker{i}.engine-pf.log")
+            pf.start()
+            engine_pfs.append(pf)
+            engine_urls[i] = f"http://127.0.0.1:{port}"
+            if wait_engine_healthy(port):
+                print(f"🧠 worker{i}: engine healthy at {engine_urls[i]}")
+            else:
+                print(f"⚠️  worker{i}: engine /api/health not ok yet at {engine_urls[i]} (continuing)")
+
     # 3) Launch workers.
     start_ts = time.time()
     procs = []
@@ -238,6 +347,8 @@ def main() -> None:
 
         env = os.environ.copy()
         env["KUBECONFIG"] = kc
+        if args.cerebral and i in engine_urls:
+            env["CEREBRAL_ENGINE_URL"] = engine_urls[i]
 
         log_path = run_root / f"worker{i}.log"
         log_fh = open(log_path, "w")
@@ -266,6 +377,11 @@ def main() -> None:
     for fh in log_files:
         if fh:
             fh.close()
+
+    # Tear down cerebral engine port-forwards (the in-cluster stacks are left
+    # running so the clusters can be reused; deploy_stack.sh --teardown removes them).
+    for pf in engine_pfs:
+        pf.stop()
 
     # 5) Merge results.
     worker_dirs = [newest_worker_dir(f"worker{i}", start_ts) if procs[i] else None for i in range(n_workers)]

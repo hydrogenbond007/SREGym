@@ -27,6 +27,7 @@ MONOREPO="${CEREBRAL_MONOREPO:-/root/cerebral-monorepo}"
 ENGINE_IMAGE="${CEREBRAL_ENGINE_IMAGE:-cerebral-engine:obs-test}"
 DATAPLANE_IMAGE="${CEREBRAL_DATAPLANE_IMAGE:-cerebral-dataplane:local}"
 WATCH_NS="${CEREBRAL_WATCH_NAMESPACES:-hotel-reservation,astronomy-shop,social-network,train-ticket,blueprint-hotel-reservation,fleetcast,tidb-cluster}"
+OBSERVER_MODEL="${CEREBRAL_OBSERVER_MODEL:-}"   # optional MESH_OBSERVER_MODEL override (e.g. deepseek-v4-pro)
 CTX="kind-${CLUSTER}"
 DEPLOY_DIR="${MONOREPO}/deploy"
 
@@ -68,6 +69,10 @@ k -n cerebral patch deploy cerebral-dataplane \
 
 echo "==> [5/6] watch SREGym app namespaces: $WATCH_NS"
 k -n cerebral set env deploy/cerebral-engine MESH_KUBERNETES_ALLOWED_NAMESPACES="$WATCH_NS"
+if [ -n "$OBSERVER_MODEL" ]; then
+  echo "    observer model: $OBSERVER_MODEL"
+  k -n cerebral set env deploy/cerebral-engine MESH_OBSERVER_MODEL="$OBSERVER_MODEL"
+fi
 
 echo "==> [6/6] wait for rollouts"
 k -n cerebral rollout status deploy/cerebral-mongodb --timeout=120s

@@ -138,16 +138,65 @@ def newest_worker_dir(label: str, after_ts: float) -> Path | None:
     return candidates[-1] if candidates else None
 
 
+def mem_available_mb() -> int:
+    """Host MemAvailable in MB (from /proc/meminfo); -1 if unreadable."""
+    try:
+        with open("/proc/meminfo") as f:
+            for line in f:
+                if line.startswith("MemAvailable:"):
+                    return int(line.split()[1]) // 1024
+    except Exception:
+        pass
+    return -1
+
+
+def start_mem_guard(procs: list, threshold_mb: int) -> threading.Event:
+    """Watchdog: if host MemAvailable drops below threshold_mb, kill all workers.
+
+    A safety backstop so a runaway problem (e.g. a metastable load generator) can
+    never OOM a shared box — we abort the run instead. Returns a 'tripped' event.
+    """
+    tripped = threading.Event()
+
+    def _watch():
+        breaches = 0
+        while not tripped.is_set():
+            if all(p is None or p.poll() is not None for p in procs):
+                return  # all workers finished
+            avail = mem_available_mb()
+            if 0 <= avail < threshold_mb:
+                breaches += 1
+                print(f"⚠️  mem-guard: MemAvailable {avail}MB < {threshold_mb}MB (strike {breaches}/2)")
+                if breaches >= 2:  # two consecutive low reads → abort
+                    print(f"🛑 mem-guard TRIPPED — killing all workers to protect the box (avail={avail}MB)")
+                    tripped.set()
+                    for p in procs:
+                        if p is not None and p.poll() is None:
+                            p.kill()
+                    return
+            else:
+                breaches = 0
+            time.sleep(15)
+
+    threading.Thread(target=_watch, daemon=True).start()
+    return tripped
+
+
 def deploy_cerebral_stack(cluster: str, log_path: Path) -> None:
     """Deploy the cerebral stack into a kind cluster via deploy_stack.sh."""
     if "DEEPSEEK_API_KEY" not in os.environ:
         sys.exit("❌ --cerebral needs DEEPSEEK_API_KEY in the environment (source /root/.env).")
     print(f"🧠 deploying cerebral stack into {cluster} → {log_path}")
+    # deploy_stack.sh selects the cluster via `kubectl --context kind-<name>`, so it
+    # needs the default kubeconfig (which has every kind context). Drop any KUBECONFIG
+    # the orchestrator set (e.g. for problem discovery), which may point at one cluster.
+    deploy_env = os.environ.copy()
+    deploy_env.pop("KUBECONFIG", None)
     with open(log_path, "w") as fh:
         res = subprocess.run(
             ["bash", str(DEPLOY_STACK_SH), cluster],
             cwd=REPO_ROOT,
-            env=os.environ.copy(),
+            env=deploy_env,
             stdout=fh,
             stderr=subprocess.STDOUT,
         )
@@ -238,6 +287,20 @@ def main() -> None:
     problem_group.add_argument("--problems-file", help="File with newline-delimited problem IDs to run.")
 
     parser.add_argument(
+        "--exclude",
+        default="",
+        help="Comma-separated problem IDs to skip (e.g. the metastable load-generator problems "
+        "load_spike_rpc_retry_storm,gc_capacity_degradation,capacity_decrease_rpc_retry_storm that "
+        "spawn a ~20GB workload generator and can OOM a shared box).",
+    )
+    parser.add_argument(
+        "--mem-guard-mb",
+        type=int,
+        default=0,
+        help="If >0, abort the whole run (kill all workers) when host MemAvailable drops below this "
+        "many MB — a safety backstop against OOM-ing a shared box. 0 disables.",
+    )
+    parser.add_argument(
         "--force-build",
         action="store_true",
         help="Pass --force-build to the first worker so the agent image is (re)built before others start.",
@@ -286,6 +349,12 @@ def main() -> None:
         ]
     else:
         problems = discover_problem_ids()
+
+    excluded = {p.strip() for p in args.exclude.split(",") if p.strip()}
+    if excluded:
+        hits = sorted(p for p in problems if p in excluded)
+        problems = [p for p in problems if p not in excluded]
+        print(f"🚫 Excluding {len(hits)} problem(s): {hits}")
 
     if len(problems) < n_workers:
         print(f"ℹ️  Only {len(problems)} problems for {n_workers} workers; some workers will be idle.")
@@ -372,7 +441,10 @@ def main() -> None:
             print("⏳ Letting worker0 build the agent image before starting the rest...")
             time.sleep(90)
 
-    # 4) Wait for all workers.
+    # 4) Wait for all workers (with optional memory-guard watchdog).
+    mem_guard = start_mem_guard(procs, args.mem_guard_mb) if args.mem_guard_mb > 0 else None
+    if mem_guard is not None:
+        print(f"🛡️  mem-guard active: will abort if MemAvailable < {args.mem_guard_mb}MB")
     print("⏳ Waiting for all workers to finish...")
     exit_codes = []
     for i, proc in enumerate(procs):
@@ -386,6 +458,8 @@ def main() -> None:
     for fh in log_files:
         if fh:
             fh.close()
+    if mem_guard is not None and mem_guard.is_set():
+        print("🛑 Run was ABORTED by the memory guard — partial results only. Free up the box / reduce workers.")
 
     # Tear down cerebral engine port-forwards (the in-cluster stacks are left
     # running so the clusters can be reused; deploy_stack.sh --teardown removes them).

@@ -282,6 +282,26 @@ class CerebralRelay:
 
     # --- map the incident to SREGym submissions ----------------------------- #
     @staticmethod
+    def _readable(val: Any) -> str:
+        """Pull a human-readable root-cause sentence from a string or a structured
+        summary, dropping the engine's internal scaffolding (evidence lists,
+        scenario flags) that must not leak into the graded submission.
+
+        The engine's decision.reasoning / rca summary is often a dict like
+        {'primary_hypothesis': 'Anomaly detected: connection_refused on X',
+         'evidence': [...], 'rca_available': False}. Earlier the adapter str()'d
+        the whole dict into the submission; here we extract just the hypothesis.
+        """
+        if isinstance(val, str):
+            return val.strip()
+        if isinstance(val, dict):
+            for k in ("root_cause", "primary_hypothesis", "summary", "description", "hypothesis"):
+                v = val.get(k)
+                if isinstance(v, str) and v.strip():
+                    return v.strip()
+        return ""
+
+    @staticmethod
     def diagnosis_text(done: dict[str, Any]) -> str:
         if not done.get("anomaly"):
             return "No anomaly detected in the application."
@@ -290,7 +310,11 @@ class CerebralRelay:
         if comp:
             parts.append(f"The faulty component is '{comp}'.")
         rca = done.get("rca") or {}
-        summary = rca.get("summary") or rca.get("root_cause") or done.get("reasoning")
+        summary = (
+            CerebralRelay._readable(rca)
+            or CerebralRelay._readable(rca.get("summary"))
+            or CerebralRelay._readable(done.get("reasoning"))
+        )
         if summary:
             parts.append(f"Root cause: {summary}")
         tax = done.get("taxonomy") or {}

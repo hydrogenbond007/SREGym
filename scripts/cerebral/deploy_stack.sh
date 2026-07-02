@@ -28,6 +28,7 @@ ENGINE_IMAGE="${CEREBRAL_ENGINE_IMAGE:-cerebral-engine:obs-test}"
 DATAPLANE_IMAGE="${CEREBRAL_DATAPLANE_IMAGE:-cerebral-dataplane:local}"
 WATCH_NS="${CEREBRAL_WATCH_NAMESPACES:-hotel-reservation,astronomy-shop,social-network,train-ticket,blueprint-hotel-reservation,fleetcast,tidb-cluster}"
 OBSERVER_MODEL="${CEREBRAL_OBSERVER_MODEL:-}"   # optional MESH_OBSERVER_MODEL override (e.g. deepseek-v4-pro)
+OBSERVER_BASE_URL="${CEREBRAL_OBSERVER_BASE_URL:-}"   # optional MESH_OBSERVER_BASE_URL override (e.g. https://openrouter.ai/api)
 CTX="kind-${CLUSTER}"
 DEPLOY_DIR="${MONOREPO}/deploy"
 
@@ -72,6 +73,10 @@ k -n cerebral set env deploy/cerebral-engine MESH_KUBERNETES_ALLOWED_NAMESPACES=
 if [ -n "$OBSERVER_MODEL" ]; then
   echo "    observer model: $OBSERVER_MODEL"
   k -n cerebral set env deploy/cerebral-engine MESH_OBSERVER_MODEL="$OBSERVER_MODEL"
+fi
+if [ -n "$OBSERVER_BASE_URL" ]; then
+  echo "    observer base_url: $OBSERVER_BASE_URL"
+  k -n cerebral set env deploy/cerebral-engine MESH_OBSERVER_BASE_URL="$OBSERVER_BASE_URL"
 fi
 
 echo "==> [6/6] wait for rollouts"

@@ -418,6 +418,13 @@ def main() -> None:
 
         env = os.environ.copy()
         env["KUBECONFIG"] = kc
+        # k8s_proxy ignores KUBECONFIG and reads ~/.kube/config's current-context,
+        # so give each worker its OWN HOME with this lane's kubeconfig — otherwise
+        # every lane resolves to one global current-context (or crashes if it's unset).
+        worker_home = run_root / f"home{i}"
+        (worker_home / ".kube").mkdir(parents=True, exist_ok=True)
+        (worker_home / ".kube" / "config").write_text(Path(kc).read_text())
+        env["HOME"] = str(worker_home)
         # Ensure the interpreter dir is on PATH so a non-containerized agent's
         # kickoff_command ("python -m clients.<agent>.driver") resolves to this
         # same (venv) python, which has the deps. Without this the launcher's
